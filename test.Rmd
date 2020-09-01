@@ -1,0 +1,234 @@
+---
+title: "R Notebook"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(RSQLite)
+library(DBI)
+```
+
+```{r}
+db <- 'chinook.db'
+
+run_query <- function(q) {
+  conn <- dbConnect(SQLite(), db)
+  result <- dbGetQuery(conn, q)
+  dbDisconnect(conn)
+  return(result)
+}
+```
+
+```{r}
+show_tables <- function() {
+  q = "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')"
+  return(run_query(q))
+}
+
+show_tables()
+```
+#Business questions
+```{r}
+albums_to_purchase = '
+WITH usa_tracks_sold AS
+(
+  SELECT il.* FROM invoice_line il
+  INNER JOIN invoice i on il.invoice_id = i.invoice_id
+  INNER JOIN customer c on i.customer_id = c.customer_id
+  WHERE c.country = "USA"
+)
+SELECT 
+  g.name genre, a.name artist, al.title album,
+  count(uts.invoice_line_id) tracks_sold,
+  cast(count(uts.invoice_line_id) AS FLOAT) / (
+    SELECT COUNT(*) from usa_tracks_sold
+  ) percentage_sold
+FROM usa_tracks_sold uts
+INNER JOIN track t on t.track_id = uts.track_id
+INNER JOIN genre g on g.genre_id = t.genre_id
+LEFT JOIN album al on al.album_id = t.album_id
+LEFT JOIN artist a on a.artist_id = al.artist_id
+GROUP BY 3
+ORDER BY 4 DESC
+LIMIT 40;
+'
+run_query(albums_to_purchase)
+```
+```{r}
+library(ggplot2)
+genre_sales <- run_query(albums_to_purchase)
+ggplot(data = genre_sales, 
+       aes(x = reorder(genre, -percentage_sold), y = percentage_sold)) +
+  geom_bar(stat = 'identity')
+```
+Most sold albums are:
+- Nirvana	From The Muddy Banks Of The Wishkah [live]
+- Jimi Hendrix	Are You Experienced? 
+- The Doors	The Doors
+- Marvin Gaye	Seek And Shall Find: More Of The Best (1963-1981)
+
+```{r}
+employee_sales_performance = '
+WITH customer_support_rep_sales AS
+    (
+     SELECT
+         i.customer_id,
+         c.support_rep_id,
+         SUM(i.total) total
+     FROM invoice i
+     INNER JOIN customer c ON i.customer_id = c.customer_id
+     GROUP BY 1,2
+    )
+SELECT
+    e.first_name || " " || e.last_name employee,
+    e.hire_date,
+    SUM(csrs.total) total_sales
+FROM customer_support_rep_sales csrs
+INNER JOIN employee e ON e.employee_id = csrs.support_rep_id
+GROUP BY 1;
+'
+run_query(employee_sales_performance)
+```
+```{r}
+employee_sales <- run_query(employee_sales_performance)
+ggplot(data = employee_sales, 
+       aes(x = reorder(employee, -total_sales), y = total_sales)) +
+  geom_bar(stat = 'identity')
+```
+There is no significant difference in sales between employees. There is no data about hours worked / salary, therefore it doesn't really tell anything about productivity.
+
+```{r}
+sales_by_country = '
+WITH country_or_other AS
+    (
+     SELECT
+       CASE
+           WHEN (
+                 SELECT count(*)
+                 FROM customer
+                 where country = c.country
+                ) = 1 THEN "Other"
+           ELSE c.country
+       END AS country,
+       c.customer_id,
+       il.*
+     FROM invoice_line il
+     INNER JOIN invoice i ON i.invoice_id = il.invoice_id
+     INNER JOIN customer c ON c.customer_id = i.customer_id
+    )
+SELECT
+    country,
+    customers,
+    total_sales,
+    average_order,
+    customer_lifetime_value
+FROM
+    (
+    SELECT
+        country,
+        count(distinct customer_id) customers,
+        SUM(unit_price) total_sales,
+        SUM(unit_price) / count(distinct customer_id) customer_lifetime_value,
+        SUM(unit_price) / count(distinct invoice_id) average_order,
+        CASE
+            WHEN country = "Other" THEN 1
+            ELSE 0
+        END AS sort
+    FROM country_or_other
+    GROUP BY country
+    ORDER BY sort ASC, total_sales DESC
+    );
+'
+run_query(sales_by_country)
+```
+
+```{r}
+library(tidyverse)
+country_sales <- run_query(sales_by_country)
+country_sales <- country_sales %>% mutate(country = factor(country, levels = country))
+bar_plot <- ggplot(data = country_sales, 
+       aes(x = country, y = total_sales, fill = country)) +
+  geom_bar(stat = 'identity') + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot(bar_plot)
+```
+
+```{r}
+pie <- ggplot(data = country_sales, 
+       aes(x = "", y = total_sales, fill = country)) +
+  geom_bar(width = 1, stat = 'identity') + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  coord_polar("y", start=0)
+plot(pie)
+```
+
+USA is by far the most important country. The other group is large in total too, but exists of 15 countries.
+
+```{r}
+albums_vs_tracks = '
+WITH invoice_first_track AS
+    (
+     SELECT
+         il.invoice_id invoice_id, il.invoice_line_id, il.unit_price, 
+         MIN(il.track_id) first_track_id
+     FROM invoice_line il
+     GROUP BY 2
+    )
+SELECT
+    COUNT(invoice_line_id) number_of_invoice_lines,
+    album_purchase,
+    CAST(unit_price AS FLOAT) * (SELECT COUNT(invoice_line_id) AS FLOAT) total_sales
+   
+FROM
+    (
+    SELECT
+        ifs.*,
+        CASE
+            WHEN
+                 (
+                  SELECT t.track_id FROM track t
+                  WHERE t.album_id = (
+                                      SELECT t2.album_id FROM track t2
+                                      WHERE t2.track_id = ifs.first_track_id
+                                     ) 
+                  EXCEPT 
+                  SELECT il2.track_id FROM invoice_line il2
+                  WHERE il2.invoice_id = ifs.invoice_id
+                 ) IS NULL
+             AND
+                 (
+                  SELECT il2.track_id FROM invoice_line il2
+                  WHERE il2.invoice_id = ifs.invoice_id
+                  EXCEPT 
+                  SELECT t.track_id FROM track t
+                  WHERE t.album_id = (
+                                      SELECT t2.album_id FROM track t2
+                                      WHERE t2.track_id = ifs.first_track_id
+                                     ) 
+                 ) IS NULL
+             THEN "yes"
+             ELSE "no"
+         END AS "album_purchase"
+     FROM invoice_first_track ifs
+    )
+GROUP BY album_purchase;
+'
+run_query(albums_vs_tracks)
+```
+
+album sales accounts for 30% of total sales. Would not stop buying full albums.
+
+
+```{r}
+Rock = '
+SELECT * FROM invoice_line
+LIMIT 100
+'
+
+run_query(Rock)
+```
+
+

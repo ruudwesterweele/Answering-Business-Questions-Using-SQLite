@@ -1,0 +1,49 @@
+---
+title: "PG"
+author: "R. Westerweele"
+date: "14-8-2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(RPostgreSQL)
+
+con <- dbConnect(dbDriver("PostgreSQL"), dbname="dvdrental", host="localhost", port=5432, user="postgres",password="RuudlovesIlse")
+dbListTables(con)
+
+db <- 'dvdrental'
+
+run_query <- function(q) {
+  conn <- dbConnect(RPostgres::Postgres(), user = 'postgres',
+                 password = 'RuudlovesIlse', db)
+  result <- dbGetQuery(conn, q)
+  dbDisconnect(conn)
+  return(result)
+}
+
+test <- 'SELECT * FROM actor LIMIT 10'
+
+run_query(test)
+```
+
+```{r}
+number_films <- '
+WITH film_actor_fn AS(
+  SELECT f.title, a.first_name || ' ' || a.last_name AS full_name
+  FROM film AS f
+  INNER JOIN film_actor AS fa ON fa.film_id = f.film_id
+  INNER JOIN actor AS a ON a.actor_id = fa.actor_id
+  ORDER BY title
+)
+SELECT full_name, COUNT(*) AS number_of_films
+FROM film_actor_fn
+GROUP BY full_name
+HAVING COUNT(full_name) > 30
+ORDER BY COUNT(full_name) DESC;
+'
+```
+
